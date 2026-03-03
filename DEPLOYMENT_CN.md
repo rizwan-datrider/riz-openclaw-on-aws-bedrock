@@ -312,11 +312,12 @@ aws --profile china --region cn-north-1 cloudformation describe-stacks \
   --query 'Stacks[0].Outputs' --output table
 ```
 
-你会看到 4 个关键输出：
+你会看到 5 个关键输出：
 - `Step1InstallSSMPlugin` — SSM 插件安装链接
 - `Step2PortForwarding` — 端口转发命令
-- `Step3AccessURL` — 浏览器访问 URL（含 token）
-- `Step4StartChatting` — 开始使用
+- `Step3GetToken` — 从 SSM Parameter Store 获取 token 的命令
+- `Step4AccessURL` — 浏览器访问 URL
+- `Step5StartChatting` — 开始使用
 
 ### 第 2 步：启动端口转发
 
@@ -332,15 +333,28 @@ aws --profile china ssm start-session \
 
 > 保持这个终端窗口打开！关闭会断开连接。
 
-### 第 3 步：打开浏览器
+### 第 3 步：获取 Token
 
-复制 `Step3AccessURL` 输出的 URL，在浏览器中打开：
+运行 `Step3GetToken` 输出的命令，从 SSM Parameter Store 获取 token：
+
+```bash
+aws --profile china ssm get-parameter \
+  --name /openclaw/openclaw-china/gateway-token \
+  --with-decryption \
+  --query Parameter.Value \
+  --output text \
+  --region cn-north-1
+```
+
+### 第 4 步：打开浏览器
+
+在浏览器中打开（用上一步获取的 token 替换 `<token>`）：
 
 ```
-http://localhost:18789/?token=你的token
+http://localhost:18789/?token=<token>
 ```
 
-### 第 4 步：连接消息平台
+### 第 5 步：连接消息平台
 
 在 Web UI 中连接 WhatsApp、Telegram、Discord 或 Slack：
 
@@ -612,8 +626,9 @@ aws --profile china --region cn-north-1 cloudformation wait stack-delete-complet
 ## 安全特性
 
 - **SSM Session Manager**：无需公网 SSH 端口，自动会话日志
-- **API 密钥安全存储**：LLM API 密钥存储在 SSM Parameter Store（加密）
-- **Gateway Token**：部署时自动生成（`openssl rand -hex 24`），存储在 SSM Parameter Store
+- **API 密钥安全存储**：LLM API 密钥存储在 SSM Parameter Store（SecureString 加密），配置文件权限 600
+- **Gateway Token**：部署时自动生成（`openssl rand -hex 24`），仅存储在 SSM Parameter Store（不写入磁盘文件或 CloudFormation 输出）
+- **供应链保护**：NVM 采用下载后执行模式（非 `curl | bash`），Docker 通过 GPG 签名的 apt 源安装
 - **VPC 端点**：SSM 流量通过 AWS 内网，不经过公网
 - **最小权限 IAM**：仅授予 SSM、CloudWatch 和 SSM 参数存储权限
 - **S3 存储桶安全**：阻止所有公共访问、启用版本控制、AES256 加密
