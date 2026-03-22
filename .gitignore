@@ -17,4 +17,4 @@ admin-console/node_modules/
 *.pkg
 
 # Demo
-demo/_ui.html
+enterprise/demo/dist/
