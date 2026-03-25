@@ -1,41 +1,182 @@
 @import "tailwindcss";
 
-/* === OpenClaw Enterprise Dark Theme === */
+/* === OpenClaw Enterprise — M3 Expressive Dark Theme === */
+/* Inspired by Material Design 3 + Gemini AI Visual Design */
 @theme {
-  --color-dark-bg: #1a1c23;
-  --color-dark-card: #24262d;
-  --color-dark-sidebar: #1e2028;
-  --color-dark-border: #2e3039;
-  --color-dark-hover: #2a2c35;
-  --color-primary: #6366f1;
-  --color-primary-light: #818cf8;
-  --color-success: #22c55e;
-  --color-warning: #f59e0b;
-  --color-danger: #ef4444;
-  --color-info: #3b82f6;
-  --color-cyan: #06b6d4;
-  --color-text-primary: #e2e8f0;
-  --color-text-secondary: #94a3b8;
-  --color-text-muted: #64748b;
+  /* Surface system (M3 tonal elevation) */
+  --color-dark-bg: #111318;
+  --color-dark-card: #1d1f27;
+  --color-dark-sidebar: #161821;
+  --color-dark-border: #2d2f3a;
+  --color-dark-hover: #262833;
+  --color-surface-dim: #111318;
+  --color-surface: #1d1f27;
+  --color-surface-bright: #2a2c37;
+  --color-surface-container: #1d1f27;
+  --color-surface-container-high: #262833;
+  --color-surface-container-highest: #313340;
+  --color-surface-secondary: #262833;
+
+  /* Primary (Indigo → M3 primary) */
+  --color-primary: #a5b4fc;
+  --color-primary-light: #c7d2fe;
+  --color-primary-container: #3730a3;
+  --color-on-primary-container: #e0e7ff;
+
+  /* Secondary (Teal) */
+  --color-secondary: #5eead4;
+  --color-secondary-container: #115e59;
+
+  /* Tertiary (Amber) */
+  --color-tertiary: #fcd34d;
+  --color-tertiary-container: #78350f;
+
+  /* Semantic */
+  --color-success: #4ade80;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  --color-info: #60a5fa;
+  --color-cyan: #22d3ee;
+
+  /* Text (higher contrast for M3) */
+  --color-text-primary: #e8eaed;
+  --color-text-secondary: #9aa0a6;
+  --color-text-muted: #5f6368;
+
+  /* M3 Spring motion tokens (CSS custom properties) */
+  --spring-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --spring-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  --spring-standard: cubic-bezier(0.2, 0, 0, 1);
+  --duration-fast: 200ms;
+  --duration-default: 350ms;
+  --duration-slow: 500ms;
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-xl: 28px;
 }
 
 body {
   background-color: var(--color-dark-bg);
   color: var(--color-text-primary);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'Inter', 'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Scrollbar */
+/* Scrollbar — softer, M3 style */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.3); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.5); }
+::-webkit-scrollbar-thumb { background: rgba(165, 180, 252, 0.2); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(165, 180, 252, 0.35); }
 
 /* ApexCharts dark overrides */
-.apexcharts-tooltip { background: #24262d !important; border: 1px solid #2e3039 !important; color: #e2e8f0 !important; }
-.apexcharts-tooltip-title { background: #1a1c23 !important; border-bottom: 1px solid #2e3039 !important; }
-.apexcharts-xaxistooltip, .apexcharts-yaxistooltip { background: #24262d !important; border: 1px solid #2e3039 !important; color: #e2e8f0 !important; }
-.apexcharts-legend-text { color: #94a3b8 !important; }
+.apexcharts-tooltip { background: #1d1f27 !important; border: 1px solid #2d2f3a !important; color: #e8eaed !important; border-radius: 16px !important; }
+.apexcharts-tooltip-title { background: #111318 !important; border-bottom: 1px solid #2d2f3a !important; }
+.apexcharts-xaxistooltip, .apexcharts-yaxistooltip { background: #1d1f27 !important; border: 1px solid #2d2f3a !important; color: #e8eaed !important; border-radius: 12px !important; }
+.apexcharts-legend-text { color: #9aa0a6 !important; }
+
+/* === M3 Spring Animations === */
+
+/* Spatial spring — overshoot bounce (for position, scale, rotation) */
+@keyframes m3-spring-in {
+  0% { opacity: 0; transform: scale(0.92) translateY(8px); }
+  60% { opacity: 1; transform: scale(1.02) translateY(-2px); }
+  80% { transform: scale(0.99) translateY(1px); }
+  100% { transform: scale(1) translateY(0); }
+}
+
+@keyframes m3-spring-scale {
+  0% { transform: scale(0.95); opacity: 0; }
+  60% { transform: scale(1.03); opacity: 1; }
+  100% { transform: scale(1); }
+}
+
+/* Effects spring — no overshoot (for opacity, color) */
+@keyframes m3-fade-in {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+/* Gemini gradient pulse — thinking/loading state */
+@keyframes gemini-pulse {
+  0%, 100% { background-position: 0% 50%; opacity: 0.6; }
+  50% { background-position: 100% 50%; opacity: 1; }
+}
+
+@keyframes gemini-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+/* Gemini ripple — for voice/interaction feedback */
+@keyframes gemini-ripple {
+  0% { transform: scale(0.8); opacity: 0.8; }
+  50% { transform: scale(1.1); opacity: 0.4; }
+  100% { transform: scale(0.8); opacity: 0.8; }
+}
+
+/* Tab indicator slide */
+@keyframes tab-slide {
+  0% { transform: scaleX(0.8); opacity: 0.5; }
+  100% { transform: scaleX(1); opacity: 1; }
+}
+
+/* Card entrance — staggered spring */
+.animate-card-enter {
+  animation: m3-spring-in 0.5s var(--spring-bounce) both;
+}
+
+.animate-scale-enter {
+  animation: m3-spring-scale 0.4s var(--spring-bounce) both;
+}
+
+.animate-fade-enter {
+  animation: m3-fade-in 0.3s var(--spring-smooth) both;
+}
+
+/* Gemini gradient background for loading/thinking */
+.gemini-gradient {
+  background: linear-gradient(135deg, #a5b4fc 0%, #818cf8 25%, #6366f1 50%, #4f46e5 75%, #a5b4fc 100%);
+  background-size: 200% 200%;
+  animation: gemini-pulse 3s ease-in-out infinite;
+}
+
+.gemini-gradient-warm {
+  background: linear-gradient(135deg, #fcd34d 0%, #f59e0b 25%, #ef4444 50%, #ec4899 75%, #fcd34d 100%);
+  background-size: 200% 200%;
+  animation: gemini-pulse 2.5s ease-in-out infinite;
+}
+
+/* Shimmer loading effect */
+.shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(165, 180, 252, 0.08), transparent);
+  animation: gemini-shimmer 2s infinite;
+}
+
+/* M3 state layer — hover/press feedback */
+.state-layer {
+  position: relative;
+}
+.state-layer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--spring-smooth);
+  pointer-events: none;
+}
+.state-layer:hover::before { opacity: 0.08; }
+.state-layer:active::before { opacity: 0.12; }
 
 /* === ClawForge Logo Animations === */
 @keyframes forge-sparkle {
