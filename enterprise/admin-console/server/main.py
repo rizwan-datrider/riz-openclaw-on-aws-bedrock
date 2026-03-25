@@ -1465,6 +1465,98 @@ def get_session_detail(session_id: str):
     return {"session": session, "conversation": conv, "quality": quality, "planE": plan_e}
 
 
+@app.get("/api/v1/monitor/runtime-events")
+def get_runtime_events(minutes: int = 30):
+    """Query CloudWatch Logs for microVM lifecycle events (invocations, SIGTERM, assembly)."""
+    try:
+        import time as _time
+        cw = _boto3.client("logs", region_name="us-east-1")
+        start_time = int((_time.time() - minutes * 60) * 1000)
+        events = []
+
+        for log_group in _LOG_GROUPS:
+            try:
+                # Get all recent log events
+                resp = cw.filter_log_events(
+                    logGroupName=log_group,
+                    startTime=start_time,
+                    limit=200,
+                    interleaved=True,
+                )
+                for event in resp.get("events", []):
+                    msg = event.get("message", "")
+                    ts = event.get("timestamp", 0)
+                    iso_ts = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
+
+                    # Classify event type
+                    if "SIGTERM" in msg:
+                        events.append({"type": "release", "message": "microVM released (SIGTERM)", "timestamp": iso_ts, "raw": msg.strip()[:200]})
+                    elif "First invocation" in msg or "assembling workspace" in msg:
+                        tenant = ""
+                        if "tenant" in msg:
+                            parts = msg.split("tenant")
+                            if len(parts) > 1:
+                                tenant = parts[1].strip().split(" ")[0].strip("= ")
+                        events.append({"type": "cold_start", "message": f"Cold start — workspace assembly", "tenant": tenant, "timestamp": iso_ts, "raw": msg.strip()[:200]})
+                    elif "Workspace ready" in msg or "Workspace assembled" in msg:
+                        events.append({"type": "ready", "message": "Workspace ready", "timestamp": iso_ts, "raw": msg.strip()[:200]})
+                    elif "Invocation tenant_id=" in msg:
+                        tenant = msg.split("tenant_id=")[1].split(" ")[0] if "tenant_id=" in msg else ""
+                        msg_len = msg.split("message_len=")[1].split(" ")[0] if "message_len=" in msg else "?"
+                        events.append({"type": "invocation", "message": f"Agent invocation (msg_len={msg_len})", "tenant": tenant, "timestamp": iso_ts, "raw": msg.strip()[:200]})
+                    elif "Response tenant_id=" in msg:
+                        duration = ""
+                        if "duration_ms=" in msg:
+                            duration = msg.split("duration_ms=")[1].split(" ")[0]
+                        model = ""
+                        if "model=" in msg:
+                            model = msg.split("model=")[1].split(" ")[0]
+                        tokens = ""
+                        if "tokens=" in msg:
+                            tokens = msg.split("tokens=")[1].split(" ")[0]
+                        events.append({"type": "response", "message": f"Response ({duration}ms, {tokens} tokens, {model})", "timestamp": iso_ts, "raw": msg.strip()[:200]})
+                    elif "DynamoDB usage written" in msg:
+                        events.append({"type": "usage", "message": "Usage written to DynamoDB", "timestamp": iso_ts, "raw": msg.strip()[:200]})
+                    elif "Plan A" in msg:
+                        events.append({"type": "plan_a", "message": "Plan A constraints injected", "timestamp": iso_ts, "raw": msg.strip()[:200]})
+                    elif "S3 workspace synced" in msg or "watchdog" in msg.lower():
+                        events.append({"type": "sync", "message": "S3 workspace sync", "timestamp": iso_ts, "raw": msg.strip()[:200]})
+                    elif "SSM user-mapping" in msg:
+                        events.append({"type": "mapping", "message": msg.strip()[:100], "timestamp": iso_ts, "raw": msg.strip()[:200]})
+            except _ClientError:
+                pass
+
+        # Sort by timestamp descending (newest first)
+        events.sort(key=lambda e: e["timestamp"], reverse=True)
+
+        # Summary stats
+        invocations = [e for e in events if e["type"] == "invocation"]
+        cold_starts = [e for e in events if e["type"] == "cold_start"]
+        releases = [e for e in events if e["type"] == "release"]
+        responses = [e for e in events if e["type"] == "response"]
+
+        # Unique active tenants
+        active_tenants = set()
+        for e in invocations:
+            t = e.get("tenant", "")
+            if t:
+                active_tenants.add(t)
+
+        return {
+            "events": events[:100],  # cap at 100
+            "summary": {
+                "totalEvents": len(events),
+                "invocations": len(invocations),
+                "coldStarts": len(cold_starts),
+                "releases": len(releases),
+                "activeTenants": len(active_tenants),
+                "timeRangeMinutes": minutes,
+            },
+        }
+    except Exception as e:
+        return {"events": [], "summary": {"error": str(e)}}
+
+
 @app.get("/api/v1/monitor/alerts")
 def get_alert_rules():
     """Alert rules with real-time status evaluation against actual data."""

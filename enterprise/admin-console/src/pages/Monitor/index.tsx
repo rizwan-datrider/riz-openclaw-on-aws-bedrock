@@ -4,7 +4,7 @@ import Chart from 'react-apexcharts';
 import type { ApexOptions } from 'apexcharts';
 import { Bot, MessageSquare, Star, AlertTriangle, Shield, RefreshCw, Eye, Radio, Clock, Zap } from 'lucide-react';
 import { Card, StatCard, Badge, Button, PageHeader, Table, StatusDot, Tabs } from '../../components/ui';
-import { useSessions, useAgents, useMonitorHealth, useAlertRules } from '../../hooks/useApi';
+import { useSessions, useAgents, useMonitorHealth, useAlertRules, useRuntimeEvents } from '../../hooks/useApi';
 import { CHANNEL_LABELS } from '../../types';
 import type { ChannelType } from '../../types';
 import SessionDetail from './SessionDetail';
@@ -28,6 +28,7 @@ export default function Monitor() {
   const navigate = useNavigate();
   const { data: healthData, refetch: refetchHealth } = useMonitorHealth();
   const { data: alertRules = [], refetch: refetchAlerts } = useAlertRules();
+  const { data: runtimeData } = useRuntimeEvents(60);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('sessions');
 
@@ -107,6 +108,7 @@ export default function Monitor() {
             { id: 'sessions', label: 'Live Sessions', count: sessions.length },
             { id: 'health', label: 'Agent Health', count: health.length },
             { id: 'alerts', label: 'Alert Rules', count: alertCount || undefined },
+            { id: 'runtime', label: 'Runtime Events' },
           ]}
           activeTab={activeTab}
           onChange={setActiveTab}
@@ -241,6 +243,71 @@ export default function Monitor() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'runtime' && (
+            <div>
+              {/* Summary cards */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 mb-4">
+                <div className="rounded-lg bg-dark-bg border border-dark-border p-3 text-center">
+                  <div className="text-lg font-bold text-primary">{runtimeData?.summary?.invocations || 0}</div>
+                  <div className="text-[10px] text-text-muted">Invocations</div>
+                </div>
+                <div className="rounded-lg bg-dark-bg border border-dark-border p-3 text-center">
+                  <div className="text-lg font-bold text-amber-400">{runtimeData?.summary?.coldStarts || 0}</div>
+                  <div className="text-[10px] text-text-muted">Cold Starts</div>
+                </div>
+                <div className="rounded-lg bg-dark-bg border border-dark-border p-3 text-center">
+                  <div className="text-lg font-bold text-red-400">{runtimeData?.summary?.releases || 0}</div>
+                  <div className="text-[10px] text-text-muted">VM Releases</div>
+                </div>
+                <div className="rounded-lg bg-dark-bg border border-dark-border p-3 text-center">
+                  <div className="text-lg font-bold text-green-400">{runtimeData?.summary?.activeTenants || 0}</div>
+                  <div className="text-[10px] text-text-muted">Active Tenants</div>
+                </div>
+                <div className="rounded-lg bg-dark-bg border border-dark-border p-3 text-center">
+                  <div className="text-lg font-bold text-text-muted">{runtimeData?.summary?.timeRangeMinutes || 60}m</div>
+                  <div className="text-[10px] text-text-muted">Time Range</div>
+                </div>
+              </div>
+
+              {/* Event timeline */}
+              <p className="text-sm text-text-secondary mb-3">Real-time AgentCore microVM lifecycle events from CloudWatch Logs</p>
+              <div className="space-y-1.5 max-h-[500px] overflow-y-auto">
+                {(runtimeData?.events || []).map((e, i) => {
+                  const typeConfig: Record<string, { color: string; icon: string }> = {
+                    invocation: { color: 'text-primary', icon: '→' },
+                    response: { color: 'text-green-400', icon: '←' },
+                    cold_start: { color: 'text-amber-400', icon: '🔥' },
+                    release: { color: 'text-red-400', icon: '⏹' },
+                    ready: { color: 'text-green-400', icon: '✓' },
+                    sync: { color: 'text-cyan-400', icon: '↻' },
+                    plan_a: { color: 'text-orange-400', icon: '🛡' },
+                    usage: { color: 'text-blue-400', icon: '📊' },
+                    mapping: { color: 'text-purple-400', icon: '🔗' },
+                  };
+                  const cfg = typeConfig[e.type] || { color: 'text-text-muted', icon: '·' };
+                  return (
+                    <div key={i} className="flex items-start gap-2 rounded-lg bg-dark-bg/50 px-3 py-2 text-xs hover:bg-dark-bg transition-colors">
+                      <span className={`${cfg.color} font-mono w-4 shrink-0 text-center`}>{cfg.icon}</span>
+                      <span className="text-text-muted shrink-0 w-20 font-mono">{new Date(e.timestamp).toLocaleTimeString()}</span>
+                      <Badge color={e.type === 'invocation' ? 'primary' : e.type === 'response' ? 'success' : e.type === 'cold_start' ? 'warning' : e.type === 'release' ? 'danger' : 'default'}>
+                        {e.type}
+                      </Badge>
+                      <span className="text-text-secondary flex-1">{e.message}</span>
+                      {e.tenant && <code className="text-[10px] text-text-muted bg-dark-card px-1 rounded truncate max-w-[200px]">{e.tenant}</code>}
+                    </div>
+                  );
+                })}
+                {(!runtimeData?.events || runtimeData.events.length === 0) && (
+                  <div className="text-center py-8 text-text-muted">
+                    <Radio size={24} className="mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">No runtime events in the last {runtimeData?.summary?.timeRangeMinutes || 60} minutes</p>
+                    <p className="text-xs mt-1">Events appear when agents are invoked via IM channels or Portal</p>
+                  </div>
+                )}
               </div>
             </div>
           )}

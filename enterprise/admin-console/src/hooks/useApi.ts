@@ -161,6 +161,18 @@ export function useAlertRules() {
   });
 }
 
+export interface RuntimeEvent {
+  type: string; message: string; timestamp: string; tenant?: string; raw?: string;
+}
+
+export function useRuntimeEvents(minutes: number = 30) {
+  return useQuery<{ events: RuntimeEvent[]; summary: Record<string, number> }>({
+    queryKey: ['runtime-events', minutes],
+    queryFn: () => api.get(`/monitor/runtime-events?minutes=${minutes}`),
+    refetchInterval: 15_000,
+  });
+}
+
 // === Audit ===
 
 export function useAuditEntries(params?: { limit?: number; eventType?: string }) {
