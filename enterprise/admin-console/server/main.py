@@ -1218,10 +1218,10 @@ def _admin_assistant_direct(message: str) -> dict:
         # Use timestamp-based session to force SOUL re-read on each "clear chat"
         import time as _admin_t
         session_id = f"admin-{int(_admin_t.time()) // 3600}"  # New session every hour
-        # Bypass H2 Proxy — call Bedrock directly (not through localhost:8091)
-        # Otherwise H2 Proxy intercepts and routes to AgentCore microVM
-        cmd = ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
-               "AWS_ENDPOINT_URL_BEDROCK_RUNTIME=https://bedrock-runtime.us-east-1.amazonaws.com",
+        # Use separate HOME dir so OpenClaw reads .openclaw-admin/openclaw.json
+        # This has baseUrl pointing to real Bedrock (not H2 Proxy localhost:8091)
+        admin_home = "/home/ubuntu/.openclaw-admin-home"
+        cmd = ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", f"HOME={admin_home}",
                openclaw_bin, "agent", "--session-id", session_id,
                "--message", message, "--json", "--timeout", "120"]
         result = _sp.run(cmd, capture_output=True, text=True, timeout=130)
