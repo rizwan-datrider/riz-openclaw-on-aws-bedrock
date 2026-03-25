@@ -32,7 +32,7 @@ export default function AdminAssistant() {
     if (saved.length > 0) return saved;
     return [{
       id: 0, role: 'assistant',
-      content: `Hi ${user?.name || 'Admin'}! I'm your **IT Admin Assistant** running on this EC2 instance.\n\nI can help you with:\n- 🔍 Check system status, logs, services\n- 📊 Query DynamoDB data, S3 files\n- 🛠 Run shell commands on the Gateway EC2\n- 📋 Explain configurations and architecture\n\nWhat do you need?`,
+      content: `Hi! I'm the **IT Admin Assistant** for OpenClaw Enterprise.\n\nI run on this EC2 instance with full system access. I can:\n- 🔍 Check service status, logs, configurations\n- 📊 Query DynamoDB, S3, SSM data\n- 🛠 Run shell commands on the Gateway EC2\n- 📋 Explain the architecture and help troubleshoot\n\nWhat do you need?`,
       timestamp: new Date().toISOString(),
     }];
   });
@@ -122,7 +122,7 @@ export default function AdminAssistant() {
 
       {/* Chat panel */}
       <div className={clsx(
-        'fixed bottom-24 right-6 z-[90] w-[400px] max-h-[600px] flex flex-col',
+        'fixed bottom-24 right-6 z-[90] w-[520px] max-h-[700px] flex flex-col',
         'rounded-[24px] border border-dark-border/50 bg-dark-card shadow-2xl',
         'transition-all duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] origin-bottom-right',
         open
@@ -152,7 +152,7 @@ export default function AdminAssistant() {
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-[300px] max-h-[420px]">
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-[400px] max-h-[520px]">
           {messages.map(msg => (
             <div key={msg.id} className={clsx('flex gap-2.5', msg.role === 'user' ? 'justify-end' : '')}>
               {msg.role === 'assistant' && (

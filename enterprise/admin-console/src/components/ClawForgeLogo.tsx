@@ -14,11 +14,13 @@ interface Props {
   className?: string;
 }
 
-export default function ClawForgeLogo({ size = 36, animate = 'static', variant = 'dark', className = '' }: Props) {
-  const stroke = variant === 'dark' ? '#e2e8f0' : '#1a1d27';
-  const fill = variant === 'dark' ? '#e2e8f0' : '#1a1d27';
+export default function ClawForgeLogo({ size = 36, animate = 'static', variant, className = '' }: Props) {
+  // Auto-detect theme if variant not explicitly set
+  const autoVariant = variant || (typeof document !== 'undefined' && document.documentElement.classList.contains('light') ? 'light' : 'dark');
+  const stroke = autoVariant === 'dark' ? '#e2e8f0' : '#1a1d27';
+  const fill = autoVariant === 'dark' ? '#e2e8f0' : '#1a1d27';
   const spark = '#f97316';
-  const fillLight = variant === 'dark' ? '#94a3b8' : '#374151';
+  const fillLight = autoVariant === 'dark' ? '#94a3b8' : '#374151';
 
   return (
     <div className={`inline-flex items-center justify-center relative ${animate === 'working' ? 'animate-forge-working' : ''} ${className}`}>
