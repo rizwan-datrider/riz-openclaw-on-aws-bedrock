@@ -280,7 +280,7 @@ For employees who don't use IM tools, the Web Portal provides the same experienc
 | Layer | Mechanism | Detail |
 |-------|-----------|--------|
 | **Network** | No open ports | SSM port forwarding or CloudFront (origin restricted to CloudFront managed prefix list `pl-3b927c52`) |
-| **Credentials** | Environment variables only | `ADMIN_PASSWORD` and `JWT_SECRET` are never in source code. JWT secret generated via `openssl rand -hex 32` |
+| **Credentials** | AWS SSM SecureString | `ADMIN_PASSWORD` and `JWT_SECRET` stored encrypted in SSM. Startup script fetches them at boot — no plaintext in service files, source code, or environment |
 | **Compute** | Firecracker microVM isolation | Each agent runs in a separate microVM with its own filesystem, network, and memory space |
 | **IAM** | Least privilege | AgentCore role: DynamoDB, S3, SSM, Bedrock only. No admin access, no wildcard policies |
 | **Data** | Role-based scoping | Admin: all data. Manager: own department (BFS rollup). Employee: own data only. Enforced at API level |
@@ -293,136 +293,257 @@ For employees who don't use IM tools, the Web Portal provides the same experienc
 
 ### Prerequisites
 
-- AWS CLI v2.27+ / Node.js 18+ / Python 3.10+ / Docker
-- SSM Session Manager Plugin ([install](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html))
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| AWS CLI | v2.27+ | `aws --version` — `bedrock-agentcore-control` requires 2.27+ |
+| Docker | Any | Must support `--platform linux/arm64` (Mac M1/M2/M3 natively; Linux needs QEMU: `docker run --privileged --rm tonistiigi/binfmt --install arm64`) |
+| Node.js | 18+ | For building the Admin Console frontend |
+| Python | 3.10+ | For seed scripts and Admin Console backend |
+| SSM Plugin | Latest | [Install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) — required for EC2 access without SSH |
 
-### Step 1: Deploy Infrastructure
+**AWS requirements:**
+- Bedrock model access enabled for your account — go to [AWS Console → Bedrock → Model Access](https://console.aws.amazon.com/bedrock/home#/modelaccess) and enable **Amazon Nova 2 Lite** (default model). Enable others if you plan to use them.
+- Bedrock AgentCore available in `us-east-1` and `us-west-2`.
+- IAM permissions: `cloudformation:*`, `ec2:*`, `iam:*`, `ecr:*`, `s3:*`, `ssm:*`, `bedrock:*`, `dynamodb:*`
+
+### Step 1: Deploy Infrastructure + AgentCore Runtime
+
+This single script handles everything: CloudFormation stack (EC2 + ECR + S3 + IAM), Docker image build and push to ECR, AgentCore Runtime creation, and Runtime ID stored in SSM.
 
 ```bash
-cd enterprise
-bash deploy-multitenancy.sh <STACK_NAME> <REGION>
-# Example: bash deploy-multitenancy.sh openclaw-multitenancy us-east-1
-# Creates: EC2 Gateway, ECR, S3, IAM roles, AgentCore Runtime (~10 min)
-cd ..   # back to repo root
+cd enterprise   # from repo root
+bash deploy-multitenancy.sh openclaw-multitenancy us-east-1
+# Takes ~15 minutes. Coffee time ☕
 ```
 
-Get outputs:
+What it creates:
+- EC2 (c7g.large, Graviton) — OpenClaw Gateway + H2 Proxy + Tenant Router
+- ECR repository — Agent Container Docker image
+- S3 bucket — tenant workspaces, SOUL templates, skills, knowledge docs
+- IAM roles — EC2 instance role, AgentCore execution role (least privilege)
+- AgentCore Runtime — Firecracker microVM runtime backed by ECR image
+- SSM parameters — gateway token, runtime ID, stack config
+
+After completion, export these variables for subsequent steps:
 ```bash
 STACK_NAME="openclaw-multitenancy"
 REGION="us-east-1"
+DYNAMODB_REGION="us-east-2"   # DynamoDB can be in a different region
 
 INSTANCE_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION \
   --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' --output text)
 S3_BUCKET=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION \
   --query 'Stacks[0].Outputs[?OutputKey==`TenantWorkspaceBucketName`].OutputValue' --output text)
+
+echo "Instance: $INSTANCE_ID"
+echo "S3 Bucket: $S3_BUCKET"
 ```
 
 ### Step 2: Create DynamoDB Table
+
+DynamoDB is in `us-east-2` by default (separate from the gateway EC2 in `us-east-1`) — keeps latency low for the Admin Console. Change both regions to the same value if you prefer.
 
 ```bash
 aws dynamodb create-table \
   --table-name openclaw-enterprise \
   --attribute-definitions \
-    AttributeName=PK,AttributeType=S AttributeName=SK,AttributeType=S \
-    AttributeName=GSI1PK,AttributeType=S AttributeName=GSI1SK,AttributeType=S \
-  --key-schema AttributeName=PK,KeyType=HASH AttributeName=SK,KeyType=RANGE \
-  --global-secondary-indexes '[{"IndexName":"GSI1","KeySchema":[{"AttributeName":"GSI1PK","KeyType":"HASH"},{"AttributeName":"GSI1SK","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}]' \
-  --billing-mode PAY_PER_REQUEST --region us-east-2
+    AttributeName=PK,AttributeType=S \
+    AttributeName=SK,AttributeType=S \
+    AttributeName=GSI1PK,AttributeType=S \
+    AttributeName=GSI1SK,AttributeType=S \
+  --key-schema \
+    AttributeName=PK,KeyType=HASH \
+    AttributeName=SK,KeyType=RANGE \
+  --global-secondary-indexes '[{
+    "IndexName":"GSI1",
+    "KeySchema":[
+      {"AttributeName":"GSI1PK","KeyType":"HASH"},
+      {"AttributeName":"GSI1SK","KeyType":"RANGE"}
+    ],
+    "Projection":{"ProjectionType":"ALL"}
+  }]' \
+  --billing-mode PAY_PER_REQUEST \
+  --region $DYNAMODB_REGION
 ```
 
 ### Step 3: Seed Sample Organization
 
-This creates a sample company (ACME Corp) with 20 employees, 20 agents, 10 positions across 7 departments.
+Creates ACME Corp — 22 employees, 23 agents, 11 positions, 13 departments. Run from the server directory in order:
 
 ```bash
 cd enterprise/admin-console/server   # from repo root
 pip install boto3 requests
-export S3_BUCKET="$S3_BUCKET"
 
-# DynamoDB seeds
-python3 seed_dynamodb.py --region us-east-2          # org structure, employees, agents
-python3 seed_audit_approvals.py --region us-east-2   # audit log, approval queue
-python3 seed_usage.py --region us-east-2             # usage metrics, sessions
-python3 seed_routing_conversations.py --region us-east-2  # routing rules, conversations
-python3 seed_roles.py --region us-east-2             # RBAC roles
-python3 seed_settings.py --region us-east-2          # model + security config
+# 1. DynamoDB — org structure must come first (other seeds reference employee IDs)
+python3 seed_dynamodb.py         --region $DYNAMODB_REGION   # employees, agents, departments
+python3 seed_roles.py            --region $DYNAMODB_REGION   # RBAC (admin/manager/employee)
+python3 seed_settings.py         --region $DYNAMODB_REGION   # model config, security policy
+python3 seed_audit_approvals.py  --region $DYNAMODB_REGION   # audit log, approval samples
+python3 seed_usage.py            --region $DYNAMODB_REGION   # usage metrics, session records
+python3 seed_routing_conversations.py --region $DYNAMODB_REGION  # routing rules
 
-# SSM seeds (same region as AgentCore)
-python3 seed_ssm_tenants.py --region us-east-1 --stack $STACK_NAME  # tenant→position mappings
+# 2. SSM — tenant→position mappings (region must match AgentCore region)
+python3 seed_ssm_tenants.py --region $REGION --stack $STACK_NAME
 
-# S3 seeds
-python3 seed_skills_final.py                         # 26 skills (auto-detects bucket)
-python3 seed_workspaces.py                           # employee workspaces (auto-detects)
-python3 seed_all_workspaces.py --bucket "$S3_BUCKET" # remaining workspaces
-python3 seed_knowledge_docs.py --bucket "$S3_BUCKET" # 12 knowledge documents
+# 3. S3 — workspace files and knowledge docs (auto-detects bucket from env or SSM)
+export S3_BUCKET=$S3_BUCKET
+python3 seed_skills_final.py                          # 26 skills with role permissions
+python3 seed_workspaces.py                            # SOUL.md, USER.md per employee
+python3 seed_all_workspaces.py   --bucket $S3_BUCKET  # MEMORY.md, IDENTITY.md
+python3 seed_knowledge_docs.py   --bucket $S3_BUCKET  # 12 knowledge documents
 ```
 
 ### Step 4: Deploy Admin Console
 
 ```bash
-# Build frontend
+# Build frontend (from repo root)
 cd enterprise/admin-console
-npm install
-npm run build
-cd ../..   # back to repo root
+npm install && npm run build
+cd ../..
 
-# Package and upload
+# Upload dist + server to S3
 COPYFILE_DISABLE=1 tar czf /tmp/admin-deploy.tar.gz -C enterprise/admin-console dist server
 aws s3 cp /tmp/admin-deploy.tar.gz "s3://${S3_BUCKET}/_deploy/admin-deploy.tar.gz"
 
-# Install on EC2 (via SSM — no SSH needed)
+# Install on EC2 via SSM
 aws ssm send-command --instance-ids $INSTANCE_ID --region $REGION \
   --document-name AWS-RunShellScript \
-  --parameters '{"commands":[
-    "python3 -m venv /opt/admin-venv",
-    "/opt/admin-venv/bin/pip install fastapi uvicorn boto3 requests",
-    "aws s3 cp s3://'"$S3_BUCKET"'/_deploy/admin-deploy.tar.gz /tmp/admin-deploy.tar.gz",
-    "mkdir -p /opt/admin-console && tar xzf /tmp/admin-deploy.tar.gz -C /opt/admin-console",
-    "chown -R ubuntu:ubuntu /opt/admin-console /opt/admin-venv"
-  ]}'
+  --parameters "{\"commands\":[
+    \"python3 -m venv /opt/admin-venv\",
+    \"/opt/admin-venv/bin/pip install fastapi uvicorn boto3 requests\",
+    \"aws s3 cp s3://${S3_BUCKET}/_deploy/admin-deploy.tar.gz /tmp/admin-deploy.tar.gz --region $REGION\",
+    \"mkdir -p /opt/admin-console && tar xzf /tmp/admin-deploy.tar.gz -C /opt/admin-console\",
+    \"chown -R ubuntu:ubuntu /opt/admin-console /opt/admin-venv\"
+  ]}"
 ```
 
-Create systemd service (replace `<YOUR_PASSWORD>`):
+Store secrets in SSM (no plaintext in service files):
+```bash
+# Replace <YOUR_PASSWORD> with your chosen admin password
+aws ssm put-parameter \
+  --name "/openclaw/${STACK_NAME}/admin-password" \
+  --value "<YOUR_PASSWORD>" \
+  --type SecureString --overwrite --region $REGION
+
+aws ssm put-parameter \
+  --name "/openclaw/${STACK_NAME}/jwt-secret" \
+  --value "$(openssl rand -hex 32)" \
+  --type SecureString --overwrite --region $REGION
+```
+
+Create startup wrapper and systemd service on EC2:
 ```bash
 aws ssm send-command --instance-ids $INSTANCE_ID --region $REGION \
   --document-name AWS-RunShellScript \
-  --parameters '{"commands":[
-    "printf \"[Unit]\nDescription=OpenClaw Admin Console\nAfter=network.target\n\n[Service]\nType=simple\nUser=ubuntu\nWorkingDirectory=/opt/admin-console/server\nEnvironment=AWS_REGION=us-east-2\nEnvironment=CONSOLE_PORT=8099\nEnvironment=TENANT_ROUTER_URL=http://localhost:8090\nEnvironment=ADMIN_PASSWORD=<YOUR_PASSWORD>\nEnvironment=JWT_SECRET=$(openssl rand -hex 32)\nExecStart=/opt/admin-venv/bin/python main.py\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n\" > /etc/systemd/system/openclaw-admin.service",
-    "systemctl daemon-reload && systemctl enable openclaw-admin && systemctl start openclaw-admin"
-  ]}'
+  --parameters "{\"commands\":[
+    \"cat > /opt/admin-console/start.sh << 'SCRIPT'\n#!/bin/bash\nexport ADMIN_PASSWORD=\$(aws ssm get-parameter --name /openclaw/${STACK_NAME}/admin-password --with-decryption --query Parameter.Value --output text --region ${REGION} 2>/dev/null)\nexport JWT_SECRET=\$(aws ssm get-parameter --name /openclaw/${STACK_NAME}/jwt-secret --with-decryption --query Parameter.Value --output text --region ${REGION} 2>/dev/null)\nexport AWS_REGION=${DYNAMODB_REGION}\nexport CONSOLE_PORT=8099\nexport TENANT_ROUTER_URL=http://localhost:8090\ncd /opt/admin-console/server\nexec /opt/admin-venv/bin/python main.py\nSCRIPT\",
+    \"chmod +x /opt/admin-console/start.sh\",
+    \"printf '[Unit]\\nDescription=OpenClaw Admin Console\\nAfter=network.target\\n\\n[Service]\\nType=simple\\nUser=ubuntu\\nExecStart=/opt/admin-console/start.sh\\nRestart=always\\n\\n[Install]\\nWantedBy=multi-user.target\\n' > /etc/systemd/system/openclaw-admin.service\",
+    \"systemctl daemon-reload && systemctl enable openclaw-admin && systemctl start openclaw-admin\"
+  ]}"
 ```
 
-### Step 5: Access
+### Step 5: Start Gateway Services
+
+The H2 Proxy and Tenant Router must run as systemd services. Install the service files:
 
 ```bash
+aws ssm send-command --instance-ids $INSTANCE_ID --region $REGION \
+  --document-name AWS-RunShellScript \
+  --parameters "{\"commands\":[
+    \"sudo mkdir -p /etc/openclaw\",
+    \"printf 'STACK_NAME=${STACK_NAME}\\nAWS_REGION=${REGION}\\nBEDROCK_MODEL_ID=global.amazon.nova-2-lite-v1:0\\n' > /etc/openclaw/env\",
+    \"cp /home/ubuntu/sample-OpenClaw-on-AWS-with-Bedrock/enterprise/gateway/bedrock-proxy-h2.service /etc/systemd/system/\",
+    \"cp /home/ubuntu/sample-OpenClaw-on-AWS-with-Bedrock/enterprise/gateway/tenant-router.service /etc/systemd/system/\",
+    \"systemctl daemon-reload\",
+    \"systemctl enable bedrock-proxy-h2 tenant-router\",
+    \"systemctl start bedrock-proxy-h2 tenant-router\"
+  ]}"
+```
+
+Verify all services are running:
+```bash
+aws ssm send-command --instance-ids $INSTANCE_ID --region $REGION \
+  --document-name AWS-RunShellScript \
+  --parameters '{"commands":["systemctl is-active openclaw-admin bedrock-proxy-h2 tenant-router openclaw-gateway"]}' \
+  --query 'Command.CommandId' --output text
+# All four should show "active"
+```
+
+### Step 6: Access Admin Console
+
+```bash
+# Open an SSM port forwarding tunnel (keep this terminal open)
 aws ssm start-session --target $INSTANCE_ID --region $REGION \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["8099"],"localPortNumber":["8199"]}'
-# Open http://localhost:8199
 ```
 
-### Local Development (no AgentCore)
+Open **http://localhost:8199** in your browser.
+
+Login with any employee ID from the [Demo Accounts](#demo-accounts) table and the password you set in Step 4. Start with `emp-z3` (admin) to see the full Admin Console.
+
+> **Tip:** To expose publicly, put CloudFront in front. Assign an Elastic IP to the EC2 first so the CloudFront origin doesn't change on reboot: `aws ec2 allocate-address --domain vpc --region $REGION` then associate it.
+
+### Step 7: Connect IM Channels (Optional)
+
+For Discord/Telegram/WhatsApp — access the OpenClaw Gateway UI to connect your bots:
 
 ```bash
-cd enterprise/admin-console && npm install && npm run dev   # Frontend on :3000
+# Get gateway token
+aws ssm get-parameter \
+  --name "/openclaw/${STACK_NAME}/gateway-token" \
+  --with-decryption --query Parameter.Value --output text --region $REGION
 
+# Open gateway tunnel
+aws ssm start-session --target $INSTANCE_ID --region $REGION \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+# Open http://localhost:18789/?token=<token_from_above>
+```
+
+Then follow the IM channel setup guides in the OpenClaw documentation.
+After connecting, use Admin Console → **Bindings → IM User Mappings → Approve Pairing** to link IM user IDs to employee accounts.
+
+---
+
+### Local Development (no AWS)
+
+The demo server runs the full Admin Console UI with mock data — no AWS account needed.
+
+```bash
+# Build frontend
+cd enterprise/admin-console && npm install && npm run build
+cp -r dist ../demo/dist
+
+# Run demo server
+cd ../demo && python3 server.py
+# Open http://localhost:8099
+# Login: emp-z3 / any password
+```
+
+For full backend development with a real DynamoDB:
+```bash
 cd enterprise/admin-console/server
 pip install -r requirements.txt
-export ADMIN_PASSWORD="your-password" JWT_SECRET=$(openssl rand -hex 32) AWS_REGION=us-east-2
-python3 main.py                                             # Backend on :8099
+export ADMIN_PASSWORD="dev-password"
+export JWT_SECRET=$(openssl rand -hex 32)
+export AWS_REGION=us-east-2
+python3 main.py   # API on http://localhost:8099
 ```
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ADMIN_PASSWORD` | Yes | Login password for all accounts |
-| `JWT_SECRET` | Yes | JWT signing secret (`openssl rand -hex 32`) |
-| `AWS_REGION` | Yes | DynamoDB region (default: us-east-2) |
-| `CONSOLE_PORT` | No | Admin Console port (default: 8099) |
-| `TENANT_ROUTER_URL` | No | Tenant Router URL (default: http://localhost:8090) |
-| `DYNAMODB_TABLE` | No | DynamoDB table name (default: openclaw-enterprise) |
-| `DYNAMODB_REGION` | No | DynamoDB region for agent container (default: us-east-2) |
+| `ADMIN_PASSWORD` | Yes | Login password for all accounts. In production: store in SSM SecureString at `/openclaw/<STACK>/admin-password` |
+| `JWT_SECRET` | Yes | JWT signing secret. Generate with `openssl rand -hex 32`. In production: store in SSM at `/openclaw/<STACK>/jwt-secret` |
+| `AWS_REGION` | Yes | DynamoDB region (default: `us-east-2`) |
+| `CONSOLE_PORT` | No | Admin Console port (default: `8099`) |
+| `TENANT_ROUTER_URL` | No | Tenant Router base URL (default: `http://localhost:8090`) |
+| `DYNAMODB_TABLE` | No | DynamoDB table name (default: `openclaw-enterprise`) |
+| `DYNAMODB_REGION` | No | Agent container DynamoDB region (default: `us-east-2`) |
+| `ALLOWED_ORIGINS` | No | CORS allowed origins, comma-separated (default: `https://your-domain.com,http://localhost:5173`) |
 
 ## Sample Organization
 
@@ -492,9 +613,9 @@ Settings → LLM Provider → **Change default model** (writes to DynamoDB)
 Changes take effect on next agent cold start — no redeployment needed
 
 ### 7. IT Admin Assistant
-Click the **floating chat bubble** (bottom-right) → Chat with the IT Admin Agent
-This agent runs on the Gateway EC2 with full system access (shell, file, browser)
-Try: "Check Gateway service status" or "Show recent CloudWatch logs"
+Click the **floating chat bubble** (bottom-right, admin role only) → Chat with the IT Admin Agent.
+Backed by Claude via Bedrock Converse API with 10 whitelisted tools (no shell, no subprocess).
+Try: `"How many employees are in Engineering?"` or `"Show me the Finance Analyst SOUL template"` or `"What's today's token usage by department?"`
 
 ### 8. Workspace Explorer
 Workspace Manager → Select an agent → **M3 collapsible tree** with folders
