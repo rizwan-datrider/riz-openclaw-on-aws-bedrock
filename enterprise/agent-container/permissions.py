@@ -34,8 +34,9 @@ PROFILES = {
 
 DEFAULT_PROFILE = PROFILES["basic"]
 
-# Always blocked regardless of profile — arbitrary code execution risk
-ALWAYS_BLOCKED_TOOLS = {"install_skill", "load_extension", "eval"}
+# Always blocked for standard agents — arbitrary code execution risk.
+# Exec profile bypasses Plan A entirely so this only applies to non-exec.
+ALWAYS_BLOCKED_TOOLS = {"load_extension", "eval"}
 
 
 class PermissionDeniedError(Exception):

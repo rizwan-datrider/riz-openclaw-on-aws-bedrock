@@ -343,20 +343,24 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
             logger.warning("workspace_assembler.py not found at %s", assembler)
 
         # 3. Plan A: Prepend permission constraints to merged SOUL.md
-        # This is the hard enforcement layer — even if the LLM ignores SOUL instructions,
-        # the constraints appear at the very top of the system prompt.
+        # Skip for exec profile — SOUL.md already declares full tool access,
+        # and injecting restrictions would conflict with the executive tier design.
         soul_path = os.path.join(WORKSPACE, "SOUL.md")
         if os.path.isfile(soul_path):
             try:
-                constraint = _build_system_prompt(tenant_id)
-                if constraint:
-                    with open(soul_path, "r") as f:
-                        existing = f.read()
-                    # Only prepend if not already present (idempotent)
-                    if "Allowed tools for this session" not in existing:
-                        with open(soul_path, "w") as f:
-                            f.write(f"<!-- PLAN A: PERMISSION ENFORCEMENT -->\n{constraint}\n\n---\n\n{existing}")
-                        logger.info("Plan A constraints injected into SOUL.md for %s", tenant_id)
+                profile = read_permission_profile(tenant_id)
+                is_exec = profile.get("role") == "exec" or profile.get("profile") == "exec"
+                if not is_exec:
+                    constraint = _build_system_prompt(tenant_id)
+                    if constraint:
+                        with open(soul_path, "r") as f:
+                            existing = f.read()
+                        if "Allowed tools for this session" not in existing:
+                            with open(soul_path, "w") as f:
+                                f.write(f"<!-- PLAN A: PERMISSION ENFORCEMENT -->\n{constraint}\n\n---\n\n{existing}")
+                            logger.info("Plan A constraints injected into SOUL.md for %s", tenant_id)
+                else:
+                    logger.info("Plan A skipped for exec profile tenant %s", tenant_id)
             except Exception as e:
                 logger.warning("Plan A injection failed for %s: %s", tenant_id, e)
 
