@@ -700,7 +700,6 @@ export default function SecurityCenter() {
         tabs={[
           { id: 'runtimes', label: 'Agent Runtimes' },
           { id: 'policies', label: 'Security Policies' },
-          { id: 'models', label: 'LLM Provider' },
           { id: 'infrastructure', label: 'Infrastructure' },
         ]}
         activeTab={tab}
@@ -831,9 +830,6 @@ export default function SecurityCenter() {
             </Card>
           </div>
         )}
-
-        {/* ── LLM Provider ── */}
-        {tab === 'models' && <LLMProviderTab positions={positions} />}
 
         {/* ── Infrastructure ── */}
         {tab === 'infrastructure' && (

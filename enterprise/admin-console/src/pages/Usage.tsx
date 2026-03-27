@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import Chart from 'react-apexcharts';
 import type { ApexOptions } from 'apexcharts';
-import { DollarSign, TrendingUp, TrendingDown, Users, Bot, AlertTriangle, Download, Calendar, Info } from 'lucide-react';
-import { Card, StatCard, Badge, Button, PageHeader, Table, Tabs } from '../components/ui';
-import { useUsageSummary, useUsageByDepartment, useUsageByAgent, useUsageBudgets, useUsageTrend, useUsageByModel } from '../hooks/useApi';
+import { DollarSign, TrendingUp, TrendingDown, Users, Bot, AlertTriangle, Download, Calendar, Info, Cpu, Plus, Trash2 } from 'lucide-react';
+import { Card, StatCard, Badge, Button, PageHeader, Table, Tabs, Select, Modal } from '../components/ui';
+import { useUsageSummary, useUsageByDepartment, useUsageByAgent, useUsageBudgets, useUsageTrend, useUsageByModel, useModelConfig, useUpdateModelConfig, useUpdateFallbackModel, useSetPositionModel, useRemovePositionModel, usePositions } from '../hooks/useApi';
 
 const costTrendOpts: ApexOptions = {
   chart: { type: 'area', toolbar: { show: false }, background: 'transparent' },
@@ -25,10 +25,30 @@ export default function Usage() {
   const { data: byModel = [] } = useUsageByModel();
   const { data: budgets = [] } = useUsageBudgets();
   const { data: trend = [] } = useUsageTrend();
+  const { data: mc } = useModelConfig();
+  const { data: positions = [] } = usePositions();
+  const updateDefault = useUpdateModelConfig();
+  const updateFallback = useUpdateFallbackModel();
+  const setPositionModel = useSetPositionModel();
+  const removePositionModel = useRemovePositionModel();
   const [activeTab, setActiveTab] = useState('department');
   const [timeRange, setTimeRange] = useState('7d');
+  const [modelModal, setModelModal] = useState<'default' | 'fallback' | 'override' | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState('');
+  const [overridePosId, setOverridePosId] = useState('');
+  const [overrideReason, setOverrideReason] = useState('');
 
   const s = summary || { totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0, totalRequests: 0, tenantCount: 0, chatgptEquivalent: 5 };
+  const m = mc || { default: { modelId: '', modelName: '—', inputRate: 0, outputRate: 0 }, fallback: { modelId: '', modelName: '', inputRate: 0, outputRate: 0 }, positionOverrides: {}, availableModels: [] };
+  const modelOptions = m.availableModels.map((mo: any) => ({ label: `${mo.modelName}  ($${mo.inputRate} in / $${mo.outputRate} out per 1M tokens)`, value: mo.modelId }));
+  const findModel = (id: string) => m.availableModels.find((mo: any) => mo.modelId === id);
+  const handleModelSave = () => {
+    const model = findModel(selectedModelId); if (!model) return;
+    if (modelModal === 'default') updateDefault.mutate({ modelId: model.modelId, modelName: model.modelName, inputRate: model.inputRate, outputRate: model.outputRate });
+    else if (modelModal === 'fallback') updateFallback.mutate({ modelId: model.modelId, modelName: model.modelName, inputRate: model.inputRate, outputRate: model.outputRate });
+    else if (modelModal === 'override' && overridePosId) setPositionModel.mutate({ posId: overridePosId, modelId: model.modelId, modelName: model.modelName, inputRate: model.inputRate, outputRate: model.outputRate, reason: overrideReason || 'Custom model' });
+    setModelModal(null); setSelectedModelId(''); setOverridePosId(''); setOverrideReason('');
+  };
 
   const buildDeptBarOpts = (depts: typeof byDept): ApexOptions => ({
     chart: { type: 'bar', toolbar: { show: false }, background: 'transparent', stacked: true },
@@ -123,6 +143,7 @@ export default function Usage() {
             { id: 'department', label: 'By Department', count: byDept.length },
             { id: 'agent', label: 'By Agent', count: byAgent.length },
             { id: 'model', label: 'By Model' },
+            { id: 'pricing', label: 'Models & Pricing' },
             { id: 'budget', label: 'Budget Management', count: budgets.filter(b => b.status !== 'ok').length || undefined },
           ]}
           activeTab={activeTab}
@@ -305,8 +326,121 @@ export default function Usage() {
               </div>
             </div>
           )}
+          {/* ── Models & Pricing ── */}
+          {activeTab === 'pricing' && (
+            <div className="space-y-6">
+              {/* Current default + actual spend */}
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {[
+                  { label: 'Default Model', model: m.default, action: () => { setModelModal('default'); setSelectedModelId(m.default.modelId); }, badge: 'primary' as const },
+                  { label: 'Fallback Model', model: m.fallback, action: () => { setModelModal('fallback'); setSelectedModelId(m.fallback.modelId); }, badge: 'warning' as const },
+                ].map(r => (
+                  <Card key={r.label}>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-semibold text-text-primary flex items-center gap-2"><Cpu size={15} className="text-primary" />{r.label}</h3>
+                      <Button variant="default" size="sm" onClick={r.action}>Change</Button>
+                    </div>
+                    <div className="rounded-xl bg-surface-dim p-3 space-y-1.5">
+                      <p className="text-base font-semibold text-text-primary">{r.model.modelName || '—'}</p>
+                      <p className="text-[10px] font-mono text-text-muted">{r.model.modelId}</p>
+                      <div className="flex gap-2">
+                        <Badge color={r.badge}>In: ${r.model.inputRate}/1M tokens</Badge>
+                        <Badge color={r.badge}>Out: ${r.model.outputRate}/1M tokens</Badge>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+
+              {/* Per-position overrides */}
+              <Card>
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-primary">Per-Position Model Overrides</h3>
+                    <p className="text-xs text-text-muted">Assign a different model (and cost tier) to specific positions</p>
+                  </div>
+                  <Button variant="primary" size="sm" onClick={() => setModelModal('override')}><Plus size={13} /> Add Override</Button>
+                </div>
+                {Object.keys(m.positionOverrides).length === 0 ? (
+                  <p className="text-sm text-text-muted text-center py-6">All positions use the default model</p>
+                ) : (
+                  <div className="divide-y divide-dark-border/30">
+                    {Object.entries(m.positionOverrides).map(([posId, ov]: [string, any]) => (
+                      <div key={posId} className="flex items-center justify-between py-3">
+                        <div>
+                          <p className="text-sm font-medium text-text-primary">{positions.find(p => p.id === posId)?.name || posId}</p>
+                          <p className="text-xs text-text-muted">{ov.modelName} · ${ov.inputRate}/${ov.outputRate} per 1M · {ov.reason}</p>
+                        </div>
+                        <Button variant="ghost" size="sm" onClick={() => removePositionModel.mutate(posId)}><Trash2 size={13} /></Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+
+              {/* All available models as a pricing card */}
+              <Card>
+                <h3 className="text-sm font-semibold text-text-primary mb-1">Available Models — Unit Pricing</h3>
+                <p className="text-xs text-text-muted mb-4">Prices per 1 million tokens. Switch default model from the cards above.</p>
+                <div className="space-y-2">
+                  {m.availableModels.map((mo: any) => {
+                    const isDefault = mo.modelId === m.default.modelId;
+                    const isFallback = mo.modelId === m.fallback.modelId;
+                    // Find actual spend for this model from byModel data
+                    const modelSpend = byModel.find(bm => bm.model?.includes(mo.modelId?.split('/').pop()?.split(':')[0] || '??'));
+                    return (
+                      <div key={mo.modelId} className={`flex items-center gap-4 rounded-xl px-4 py-3 ${isDefault ? 'bg-primary/5 border border-primary/20' : isFallback ? 'bg-warning/5 border border-warning/20' : 'bg-surface-dim'}`}>
+                        <div className={`w-2 h-2 rounded-full shrink-0 ${mo.enabled ? 'bg-success' : 'bg-text-muted'}`} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-text-primary">{mo.modelName}</p>
+                          <p className="text-[10px] font-mono text-text-muted">{mo.modelId}</p>
+                        </div>
+                        <div className="text-right shrink-0 space-y-0.5">
+                          <p className="text-xs text-text-muted">${mo.inputRate} in · ${mo.outputRate} out <span className="text-text-muted/60">per 1M</span></p>
+                          {modelSpend && <p className="text-xs text-success font-medium">${modelSpend.cost?.toFixed(4)} spent · {(modelSpend.inputTokens+modelSpend.outputTokens)/1000}k tokens</p>}
+                        </div>
+                        {isDefault && <Badge color="primary">Default</Badge>}
+                        {isFallback && <Badge color="warning">Fallback</Badge>}
+                        {!isDefault && !isFallback && mo.enabled && (
+                          <Button variant="ghost" size="sm" onClick={() => updateDefault.mutate({ modelId: mo.modelId, modelName: mo.modelName, inputRate: mo.inputRate, outputRate: mo.outputRate })}>Set Default</Button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+
+              <div className="rounded-xl bg-info/5 border border-info/20 px-4 py-3 text-xs text-info">
+                Model changes take effect on the next agent cold start (~15 min idle timeout). Actual Bedrock billing may differ slightly from estimated costs above.
+              </div>
+            </div>
+          )}
         </div>
       </Card>
+
+      {/* Model change modal */}
+      {modelModal && (
+        <Modal open={true} onClose={() => setModelModal(null)}
+          title={modelModal === 'default' ? 'Change Default Model' : modelModal === 'fallback' ? 'Change Fallback Model' : 'Add Position Override'}
+          footer={<div className="flex justify-end gap-3"><Button variant="default" onClick={() => setModelModal(null)}>Cancel</Button><Button variant="primary" onClick={handleModelSave}>Apply</Button></div>}>
+          <div className="space-y-4">
+            {modelModal === 'override' && (
+              <Select label="Position" value={overridePosId} onChange={setOverridePosId}
+                options={positions.filter(p => !m.positionOverrides[p.id]).map(p => ({ label: p.name, value: p.id }))}
+                placeholder="Select position..." />
+            )}
+            <Select label="Model" value={selectedModelId} onChange={setSelectedModelId} options={modelOptions} placeholder="Select model..." />
+            {modelModal === 'override' && (
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-text-secondary">Reason</label>
+                <input value={overrideReason} onChange={e => setOverrideReason(e.target.value)}
+                  className="w-full rounded-xl border border-dark-border/60 bg-surface-dim px-4 py-2.5 text-sm text-text-primary focus:border-primary/60 focus:outline-none"
+                  placeholder="e.g. Higher capability needed for executive decisions" />
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

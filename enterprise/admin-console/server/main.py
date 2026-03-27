@@ -4027,8 +4027,12 @@ def list_iam_roles(authorization: str = Header(default="")):
     iam = _b3iam.client("iam")
     result = []
     try:
+        # Only paginate first 2 pages (~200 roles max) to keep response fast.
+        # Relevant roles (agentcore/openclaw/bedrock) are always included.
         paginator = iam.get_paginator("list_roles")
+        pages_fetched = 0
         for page in paginator.paginate():
+            pages_fetched += 1
             for r in page["Roles"]:
                 name_lower = r["RoleName"].lower()
                 relevant = "agentcore" in name_lower or "openclaw" in name_lower or "bedrock" in name_lower
@@ -4038,6 +4042,8 @@ def list_iam_roles(authorization: str = Header(default="")):
                     "relevant": relevant,
                     "created": r["CreateDate"].isoformat() if hasattr(r["CreateDate"], "isoformat") else str(r["CreateDate"]),
                 })
+            if pages_fetched >= 2:
+                break
         result.sort(key=lambda r: (not r["relevant"], r["name"]))
     except Exception as e:
         return {"roles": [], "error": str(e)}
@@ -4088,11 +4094,32 @@ def list_vpc_resources(authorization: str = Header(default="")):
 
 @app.get("/api/v1/security/infrastructure")
 def get_infrastructure(authorization: str = Header(default="")):
-    """Aggregate view: ECR + IAM + VPC for Infrastructure tab."""
+    """Aggregate view: ECR + IAM + VPC — run in parallel for speed."""
     _require_role(authorization, roles=["admin"])
-    ecr_data = list_ecr_images(authorization)
-    iam_data = list_iam_roles(authorization)
-    vpc_data = list_vpc_resources(authorization)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _ecr():
+        return "ecr", list_ecr_images(authorization)
+
+    def _iam():
+        return "iam", list_iam_roles(authorization)
+
+    def _vpc():
+        return "vpc", list_vpc_resources(authorization)
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_ecr), pool.submit(_iam), pool.submit(_vpc)]
+        for f in as_completed(futures, timeout=15):
+            try:
+                key, data = f.result()
+                results[key] = data
+            except Exception as e:
+                pass
+
+    ecr_data = results.get("ecr", {})
+    iam_data = results.get("iam", {})
+    vpc_data = results.get("vpc", {})
     return {
         "ecrImages": ecr_data.get("images", []),
         "iamRoles": iam_data.get("roles", []),
