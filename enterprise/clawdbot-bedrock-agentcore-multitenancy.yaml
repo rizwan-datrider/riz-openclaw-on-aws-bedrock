@@ -845,6 +845,168 @@ Resources:
 
 
 # ===========================================================================
+# ECS — Always-on Shared Agents (Fargate)
+#
+# Always-on agents run as Fargate tasks instead of docker containers on EC2.
+# Each task self-registers its private IP in SSM on startup so the Tenant
+# Router can route to it without any static port mapping.
+# ===========================================================================
+
+  # Log group for ECS always-on tasks
+  AlwaysOnLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${AWS::StackName}-always-on"
+      RetentionInDays: 30
+
+  # Security group: ECS tasks accept inbound 8080 only from the EC2 gateway
+  AlwaysOnTaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for always-on ECS Fargate tasks"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref OpenClawSecurityGroup
+          Description: "Tenant Router on EC2 → agent container"
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ecs-task-sg"
+
+  # Combined execution + task role (ECS agent pulls ECR/logs; container calls AWS APIs)
+  AlwaysOnEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-ecs-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      # AmazonECSTaskExecutionRolePolicy: pull ECR images + CloudWatch Logs
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: AlwaysOnTaskPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BedrockAccess
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+              - Sid: SSMAccess
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                  - ssm:GetParametersByPath
+                  - ssm:DeleteParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*"
+              - Sid: S3WorkspaceAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !GetAtt TenantWorkspaceBucket.Arn
+                  - !Sub "${TenantWorkspaceBucket.Arn}/*"
+              - Sid: DynamoDBAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: "*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${AWS::StackName}-always-on:*"
+              - Sid: ECRTokenAccess
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ecs-task-role"
+
+  # ECS Cluster for always-on agents
+  AlwaysOnEcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${AWS::StackName}-always-on"
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-always-on-cluster"
+
+  # ECS Task Definition — image + env defaults; overridden per-agent at RunTask time
+  AlwaysOnTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-always-on-agent"
+      Cpu: "512"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt AlwaysOnEcsTaskRole.Arn
+      TaskRoleArn: !GetAtt AlwaysOnEcsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: always-on-agent
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${MultitenancyEcrRepository.RepositoryName}:latest"
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Sub "/ecs/${AWS::StackName}-always-on"
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: always-on
+              awslogs-create-group: "true"
+          Environment:
+            - Name: STACK_NAME
+              Value: !Ref AWS::StackName
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: S3_BUCKET
+              Value: !Sub "openclaw-tenants-${AWS::AccountId}"
+            - Name: DYNAMODB_TABLE
+              Value: openclaw-enterprise
+            - Name: DYNAMODB_REGION
+              Value: us-east-2
+            - Name: PORT
+              Value: "8080"
+            - Name: SYNC_INTERVAL
+              Value: "120"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-always-on-task"
+
+# ===========================================================================
 # Outputs
 # ===========================================================================
 Outputs:
@@ -915,6 +1077,30 @@ Outputs:
     Value: !Ref AgentLogsGroup
     Export:
       Name: !Sub "${AWS::StackName}-AgentLogsGroupName"
+
+  AlwaysOnEcsClusterName:
+    Description: "ECS Cluster name for always-on agents"
+    Value: !Ref AlwaysOnEcsCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-AlwaysOnEcsCluster"
+
+  AlwaysOnTaskDefinitionArn:
+    Description: "ECS Task Definition ARN for always-on agents (override image/env at RunTask)"
+    Value: !Ref AlwaysOnTaskDefinition
+    Export:
+      Name: !Sub "${AWS::StackName}-AlwaysOnTaskDefinition"
+
+  AlwaysOnTaskSecurityGroupId:
+    Description: "Security Group ID for always-on ECS Fargate tasks"
+    Value: !Ref AlwaysOnTaskSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AlwaysOnTaskSG"
+
+  AlwaysOnSubnetId:
+    Description: "Subnet ID for always-on ECS tasks (public subnet — tasks self-register private IP)"
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub "${AWS::StackName}-AlwaysOnSubnet"
 
   MonthlyCost:
     Description: "Estimated monthly cost (USD)"

@@ -504,7 +504,7 @@ aws s3 cp enterprise/gateway/tenant-router.service  "s3://${S3_BUCKET}/_deploy/t
 aws ssm send-command --instance-ids $INSTANCE_ID --region $REGION \
   --document-name AWS-RunShellScript \
   --parameters "{\"commands\":[
-    \"mkdir -p /etc/openclaw && printf 'STACK_NAME=${STACK_NAME}\\nAWS_REGION=${REGION}\\nGATEWAY_INSTANCE_ID=${INSTANCE_ID}\\n' > /etc/openclaw/env\",
+    \"mkdir -p /etc/openclaw && printf 'STACK_NAME=${STACK_NAME}\\nAWS_REGION=${REGION}\\nGATEWAY_INSTANCE_ID=${INSTANCE_ID}\\nECS_CLUSTER_NAME=${STACK_NAME}-always-on\\nECS_SUBNET_ID=$(aws cloudformation describe-stacks --stack-name ${STACK_NAME} --region ${REGION} --query Stacks[0].Outputs[?OutputKey==\\'AlwaysOnSubnetId\\'].OutputValue --output text)\\nECS_TASK_SG_ID=$(aws cloudformation describe-stacks --stack-name ${STACK_NAME} --region ${REGION} --query Stacks[0].Outputs[?OutputKey==\\'AlwaysOnTaskSecurityGroupId\\'].OutputValue --output text)\\n' > /etc/openclaw/env\",
     \"pip3 install boto3 requests\",
     \"aws s3 cp s3://${S3_BUCKET}/_deploy/tenant_router.py /home/ubuntu/tenant_router.py --region $REGION\",
     \"aws s3 cp s3://${S3_BUCKET}/_deploy/bedrock_proxy_h2.js /home/ubuntu/bedrock_proxy_h2.js --region $REGION\",
@@ -720,24 +720,51 @@ enterprise/
 
 ## Operational Notes
 
-### Always-on Container Management
+### Always-on Agent Management (ECS Fargate)
 
-Start/stop shared agents from **Agent Factory → Shared / Team Agents tab**. The admin console runs `docker run` on the EC2 via SSM and registers the endpoint in SSM.
+Always-on shared agents run as **ECS Fargate tasks** — not Docker containers on EC2. Each task self-registers its private VPC IP in SSM on startup; the Tenant Router reads that SSM entry to route requests. No port mapping required.
+
+Start/stop from **Agent Factory → Shared / Team Agents tab**, or manually:
 
 ```bash
-# Manual start (if UI unavailable)
-docker run -d --name always-on-agent-helpdesk --restart unless-stopped \
-  -p 18800:8080 \
-  -e SESSION_ID=shared__agent-helpdesk \
-  -e SHARED_AGENT_ID=agent-helpdesk \
-  -e S3_BUCKET=your-bucket \
-  -e STACK_NAME=openclaw-multitenancy \
-  $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$STACK_NAME-multitenancy-agent:latest
+# Read ECS config from CloudFormation outputs (one-time setup)
+ECS_CLUSTER=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION \
+  --query 'Stacks[0].Outputs[?OutputKey==`AlwaysOnEcsClusterName`].OutputValue' --output text)
+ECS_TASK_DEF=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION \
+  --query 'Stacks[0].Outputs[?OutputKey==`AlwaysOnTaskDefinitionArn`].OutputValue' --output text)
+ECS_SUBNET=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION \
+  --query 'Stacks[0].Outputs[?OutputKey==`AlwaysOnSubnetId`].OutputValue' --output text)
+ECS_SG=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION \
+  --query 'Stacks[0].Outputs[?OutputKey==`AlwaysOnTaskSecurityGroupId`].OutputValue' --output text)
 
-# Register endpoint
-aws ssm put-parameter --name "/openclaw/openclaw-multitenancy/always-on/agent-helpdesk/endpoint" \
-  --value "http://localhost:18800" --type String --region us-east-1
+# Write to /etc/openclaw/env so the Admin Console can use them
+aws ssm send-command --instance-ids $INSTANCE_ID --region $REGION \
+  --document-name AWS-RunShellScript \
+  --parameters "{\"commands\":[
+    \"echo 'ECS_CLUSTER_NAME=${ECS_CLUSTER}' >> /etc/openclaw/env\",
+    \"echo 'ECS_TASK_DEFINITION=${ECS_TASK_DEF}' >> /etc/openclaw/env\",
+    \"echo 'ECS_SUBNET_ID=${ECS_SUBNET}' >> /etc/openclaw/env\",
+    \"echo 'ECS_TASK_SG_ID=${ECS_SG}' >> /etc/openclaw/env\",
+    \"systemctl restart openclaw-admin\"
+  ]}"
+
+# Manual ECS RunTask (if UI unavailable)
+aws ecs run-task \
+  --cluster $ECS_CLUSTER \
+  --task-definition $ECS_TASK_DEF \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[$ECS_SUBNET],securityGroups=[$ECS_SG],assignPublicIp=ENABLED}" \
+  --overrides "{\"containerOverrides\":[{\"name\":\"always-on-agent\",\"environment\":[
+    {\"name\":\"SHARED_AGENT_ID\",\"value\":\"agent-helpdesk\"},
+    {\"name\":\"SESSION_ID\",\"value\":\"shared__agent-helpdesk\"},
+    {\"name\":\"S3_BUCKET\",\"value\":\"$S3_BUCKET\"},
+    {\"name\":\"STACK_NAME\",\"value\":\"$STACK_NAME\"},
+    {\"name\":\"AWS_REGION\",\"value\":\"$REGION\"}
+  ]}]}" \
+  --region $REGION
 ```
+
+The task's private IP is automatically registered in SSM as `/openclaw/{stack}/always-on/{agent_id}/endpoint` by `entrypoint.sh` once healthy (~30s). The Tenant Router picks it up within 60s (SSM cache TTL).
 
 ### Digital Twin Public URL
 

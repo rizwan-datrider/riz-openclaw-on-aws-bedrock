@@ -238,5 +238,40 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
+# Register ECS Fargate task endpoint in SSM once server is healthy.
+# Runs in the background so it doesn't block the main process.
+# The Tenant Router reads this SSM parameter to route requests to this task.
+if [ -n "${SHARED_AGENT_ID:-}" ] && [ -n "${ECS_CONTAINER_METADATA_URI_V4:-}" ]; then
+(
+    # Wait up to 15s for server.py to be ready
+    for i in $(seq 1 15); do
+        if curl -sf "http://localhost:8080/ping" >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    # Get this task's private IP from ECS metadata v4
+    TASK_IP=$(curl -sf "${ECS_CONTAINER_METADATA_URI_V4}" 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    nets = data.get('Networks', [])
+    print(nets[0].get('IPv4Addresses', [''])[0] if nets else '')
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+    if [ -n "$TASK_IP" ]; then
+        ENDPOINT="http://${TASK_IP}:8080"
+        aws ssm put-parameter \
+            --name "/openclaw/${STACK_NAME}/always-on/${SHARED_AGENT_ID}/endpoint" \
+            --value "$ENDPOINT" --type "String" --overwrite \
+            --region "$AWS_REGION" 2>/dev/null \
+            && echo "[entrypoint] ECS endpoint registered: $ENDPOINT" \
+            || echo "[entrypoint] WARNING: SSM endpoint registration failed"
+    else
+        echo "[entrypoint] WARNING: Could not determine ECS task IP"
+    fi
+) &
+fi
+
 echo "[entrypoint] Waiting..."
 wait "$SERVER_PID" || true

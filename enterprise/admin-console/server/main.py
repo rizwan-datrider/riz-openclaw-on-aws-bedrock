@@ -4575,147 +4575,172 @@ def get_system_stats(authorization: str = Header(default="")):
 
 
 # =========================================================================
-# Always-on Shared Agents — Docker containers on EC2
+# Always-on Shared Agents — ECS Fargate tasks
+# =========================================================================
+# Architecture: Admin Console → ECS RunTask (Fargate) → task self-registers
+# its private IP in SSM → Tenant Router reads SSM endpoint → routes to task.
+# No port mapping needed; ECS manages networking via awsvpc mode.
 # =========================================================================
 
-_ALWAYS_ON_PORT_START = 18800  # first always-on container port
 _ALWAYS_ON_ECR_IMAGE = os.environ.get("AGENT_ECR_IMAGE", "")
 
-def _next_available_port() -> int:
-    """Find an unused port for a new always-on container (18800-18899)."""
+
+def _get_ecs_config() -> dict:
+    """Resolve ECS cluster / task-def / subnet / SG from env or CloudFormation outputs via SSM."""
     stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
-    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
-    used_ports: set = set()
-    try:
-        prefix = f"/openclaw/{stack}/always-on/"
-        paginator = ssm.get_paginator("get_parameters_by_path")
-        for page in paginator.paginate(Path=prefix, Recursive=True):
-            for p in page["Parameters"]:
-                val = p.get("Value", "")
-                if "localhost:" in val:
-                    try:
-                        used_ports.add(int(val.split("localhost:")[1].split("/")[0]))
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    for port in range(_ALWAYS_ON_PORT_START, _ALWAYS_ON_PORT_START + 100):
-        if port not in used_ports:
-            return port
-    raise HTTPException(500, "No available ports for always-on container")
+    cluster   = os.environ.get("ECS_CLUSTER_NAME",      f"{stack}-always-on")
+    task_def  = os.environ.get("ECS_TASK_DEFINITION",   f"{stack}-always-on-agent")
+    subnet_id = os.environ.get("ECS_SUBNET_ID",         "")
+    sg_id     = os.environ.get("ECS_TASK_SG_ID",        "")
+
+    # Fall back to SSM if env vars are not set (written by deploy script from CF outputs)
+    if not subnet_id or not sg_id:
+        try:
+            ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+            if not subnet_id:
+                subnet_id = ssm.get_parameter(
+                    Name=f"/openclaw/{stack}/ecs/subnet-id")["Parameter"]["Value"]
+            if not sg_id:
+                sg_id = ssm.get_parameter(
+                    Name=f"/openclaw/{stack}/ecs/task-sg-id")["Parameter"]["Value"]
+        except Exception:
+            pass
+
+    return {"cluster": cluster, "task_def": task_def, "subnet_id": subnet_id, "sg_id": sg_id}
 
 
 @app.post("/api/v1/admin/always-on/{agent_id}/start")
 def start_always_on_agent(agent_id: str, authorization: str = Header(default="")):
-    """Start an always-on Docker container for a shared agent on the EC2 gateway."""
+    """Start an always-on ECS Fargate task for a shared agent."""
     _require_role(authorization, roles=["admin"])
-    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
-    bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
-    ddb_table = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+    stack     = os.environ.get("STACK_NAME",      "openclaw-multitenancy")
+    bucket    = os.environ.get("S3_BUCKET",       f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
+    ddb_table = os.environ.get("DYNAMODB_TABLE",  "openclaw-enterprise")
     ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
 
-    # Get agent info
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
 
-    port = _next_available_port()
-    endpoint = f"http://localhost:{port}"
+    ecs_cfg = _get_ecs_config()
+    if not ecs_cfg["subnet_id"] or not ecs_cfg["sg_id"]:
+        raise HTTPException(500,
+            "ECS_SUBNET_ID and ECS_TASK_SG_ID are required. "
+            "Set them in /etc/openclaw/env or run the deploy script to write them to SSM.")
 
-    # Build docker run command — same image as AgentCore, always-on mode
-    docker_cmd = (
-        f"docker run -d --name always-on-{agent_id} --restart unless-stopped "
-        f"-p {port}:8080 "
-        f"-e SESSION_ID=shared__{agent_id} "
-        f"-e SHARED_AGENT_ID={agent_id} "
-        f"-e S3_BUCKET={bucket} "
-        f"-e STACK_NAME={stack} "
-        f"-e AWS_REGION=us-east-1 "
-        f"-e DYNAMODB_TABLE={ddb_table} "
-        f"-e DYNAMODB_REGION={ddb_region} "
-        f"-e SYNC_INTERVAL=120 "
-        f"--log-opt max-size=50m --log-opt max-file=3 "
-        f"{ecr_image}"
+    ecr_image = _ALWAYS_ON_ECR_IMAGE or (
+        f"{_GATEWAY_ACCOUNT_ID}.dkr.ecr.{_GATEWAY_REGION}.amazonaws.com"
+        f"/{stack}-multitenancy-agent:latest"
     )
 
-    ecr_image = _ALWAYS_ON_ECR_IMAGE
-    if not ecr_image:
-        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
-        ecr_image = f"{_GATEWAY_ACCOUNT_ID}.dkr.ecr.{_GATEWAY_REGION}.amazonaws.com/{stack}-multitenancy-agent:latest"
-
-    # Run on EC2 via SSM
-    instance_id = _GATEWAY_INSTANCE_ID
-    if not instance_id:
-        raise HTTPException(500, "GATEWAY_INSTANCE_ID not resolved — set it in /etc/openclaw/env or ensure IMDS is accessible")
-    try:
-        import boto3 as _b3ssm
-        ssm_run = _b3ssm.client("ssm", region_name=_GATEWAY_REGION)
-        # Pull latest image first, then start
-        ecr_registry = ecr_image.split("/")[0]
-        ecr_login = f"aws ecr get-login-password --region {_GATEWAY_REGION} | docker login --username AWS --password-stdin {ecr_registry}"
-        pull_cmd = f"docker pull {ecr_image}"
-        stop_existing = f"docker rm -f always-on-{agent_id} 2>/dev/null || true"
-        resp = ssm_run.send_command(
-            InstanceIds=[instance_id],
-            DocumentName="AWS-RunShellScript",
-            Parameters={"commands": [ecr_login, pull_cmd, stop_existing, docker_cmd, f"sleep 3 && curl -s http://localhost:{port}/ping && echo STARTED"]},
-            TimeoutSeconds=120,
-        )
-        cmd_id = resp["Command"]["CommandId"]
-    except Exception as e:
-        raise HTTPException(500, f"Failed to start container: {e}")
-
-    # Register endpoint in SSM
+    # Stop any existing task for this agent first
     try:
         ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
-        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/endpoint", Value=endpoint, Type="String", Overwrite=True)
-        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/port", Value=str(port), Type="String", Overwrite=True)
-        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/ssm-cmd", Value=cmd_id, Type="String", Overwrite=True)
-    except Exception as e:
-        print(f"[always-on] SSM registration failed: {e}")
+        existing_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn"
+        )["Parameter"]["Value"]
+        import boto3 as _b3ecs_stop
+        _b3ecs_stop.client("ecs", region_name=_GATEWAY_REGION).stop_task(
+            cluster=ecs_cfg["cluster"], task=existing_arn, reason="Restarted by admin")
+    except Exception:
+        pass
 
-    # Update agent deployMode in DynamoDB
+    # Launch new ECS Fargate task
     try:
-        agents = db.get_agents()
-        a = next((x for x in agents if x["id"] == agent_id), None)
-        if a:
-            from decimal import Decimal
-            import boto3 as _b3d
-            ddb = _b3d.resource("dynamodb", region_name=ddb_region)
-            table = ddb.Table(ddb_table)
-            table.update_item(
-                Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
-                UpdateExpression="SET deployMode = :m, containerPort = :p, containerStatus = :s",
-                ExpressionAttributeValues={":m": "always-on", ":p": port, ":s": "starting"},
-            )
+        import boto3 as _b3ecs
+        ecs = _b3ecs.client("ecs", region_name=_GATEWAY_REGION)
+        resp = ecs.run_task(
+            cluster=ecs_cfg["cluster"],
+            taskDefinition=ecs_cfg["task_def"],
+            launchType="FARGATE",
+            networkConfiguration={
+                "awsvpcConfiguration": {
+                    "subnets":        [ecs_cfg["subnet_id"]],
+                    "securityGroups": [ecs_cfg["sg_id"]],
+                    "assignPublicIp": "ENABLED",   # needed to pull ECR without NAT
+                }
+            },
+            overrides={
+                "containerOverrides": [{
+                    "name": "always-on-agent",
+                    "image": ecr_image,
+                    "environment": [
+                        {"name": "SESSION_ID",       "value": f"shared__{agent_id}"},
+                        {"name": "SHARED_AGENT_ID",  "value": agent_id},
+                        {"name": "S3_BUCKET",        "value": bucket},
+                        {"name": "STACK_NAME",       "value": stack},
+                        {"name": "AWS_REGION",       "value": _GATEWAY_REGION},
+                        {"name": "DYNAMODB_TABLE",   "value": ddb_table},
+                        {"name": "DYNAMODB_REGION",  "value": ddb_region},
+                        {"name": "SYNC_INTERVAL",    "value": "120"},
+                    ],
+                }]
+            },
+            count=1,
+            tags=[
+                {"key": "agent_id",   "value": agent_id},
+                {"key": "stack_name", "value": stack},
+            ],
+        )
+        failures = resp.get("failures", [])
+        if failures:
+            raise RuntimeError(f"ECS RunTask failures: {failures}")
+        task_arn = resp["tasks"][0]["taskArn"]
+    except Exception as e:
+        raise HTTPException(500, f"Failed to start ECS task: {e}")
+
+    # Persist task ARN — endpoint is registered by entrypoint.sh once the task is RUNNING
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn",
+                          Value=task_arn, Type="String", Overwrite=True)
+    except Exception as e:
+        print(f"[always-on] SSM task-arn write failed: {e}")
+
+    # Update DynamoDB status
+    try:
+        import boto3 as _b3d
+        ddb = _b3d.resource("dynamodb", region_name=ddb_region)
+        ddb.Table(ddb_table).update_item(
+            Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
+            UpdateExpression="SET deployMode = :m, containerStatus = :s, ecsTaskArn = :t",
+            ExpressionAttributeValues={":m": "always-on-ecs", ":s": "starting", ":t": task_arn},
+        )
     except Exception as e:
         print(f"[always-on] DynamoDB update failed: {e}")
 
-    return {"started": True, "agentId": agent_id, "port": port, "endpoint": endpoint, "ssmCmdId": cmd_id}
+    return {"started": True, "agentId": agent_id, "taskArn": task_arn,
+            "note": "Task is starting. Endpoint will be registered in SSM once RUNNING (~30s)."}
 
 
 @app.post("/api/v1/admin/always-on/{agent_id}/stop")
 def stop_always_on_agent(agent_id: str, authorization: str = Header(default="")):
-    """Stop and remove the always-on container for an agent."""
+    """Stop the always-on ECS Fargate task for an agent."""
     _require_role(authorization, roles=["admin"])
     stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
 
-    # Stop container via SSM
-    try:
-        import boto3 as _b3ssm2
-        ssm_run = _b3ssm2.client("ssm", region_name=_GATEWAY_REGION)
-        ssm_run.send_command(
-            InstanceIds=["i-0aa07bd9a04fa2255"],
-            DocumentName="AWS-RunShellScript",
-            Parameters={"commands": [f"docker rm -f always-on-{agent_id} 2>/dev/null || true && echo STOPPED"]},
-        )
-    except Exception as e:
-        print(f"[always-on] Stop command failed: {e}")
-
-    # Remove SSM registration
+    task_arn = ""
     try:
         ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
-        for suffix in ["/endpoint", "/port", "/ssm-cmd"]:
+        task_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn"
+        )["Parameter"]["Value"]
+    except Exception:
+        pass
+
+    if task_arn:
+        try:
+            import boto3 as _b3ecs2
+            ecs_cfg = _get_ecs_config()
+            _b3ecs2.client("ecs", region_name=_GATEWAY_REGION).stop_task(
+                cluster=ecs_cfg["cluster"], task=task_arn, reason="Stopped by admin")
+        except Exception as e:
+            print(f"[always-on] ECS stop_task failed: {e}")
+
+    # Clean up SSM entries
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        for suffix in ["/task-arn", "/endpoint"]:
             try:
                 ssm.delete_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}{suffix}")
             except Exception:
@@ -4728,37 +4753,55 @@ def stop_always_on_agent(agent_id: str, authorization: str = Header(default=""))
         import boto3 as _b3d2
         ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
         ddb = _b3d2.resource("dynamodb", region_name=ddb_region)
-        table = ddb.Table(os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise"))
-        table.update_item(
+        ddb.Table(os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")).update_item(
             Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
-            UpdateExpression="SET deployMode = :m, containerStatus = :s REMOVE containerPort",
+            UpdateExpression="SET deployMode = :m, containerStatus = :s REMOVE ecsTaskArn",
             ExpressionAttributeValues={":m": "personal", ":s": "stopped"},
         )
     except Exception:
         pass
 
-    return {"stopped": True, "agentId": agent_id}
+    return {"stopped": True, "agentId": agent_id, "taskArn": task_arn}
 
 
 @app.get("/api/v1/admin/always-on/{agent_id}/status")
 def get_always_on_status(agent_id: str, authorization: str = Header(default="")):
-    """Get status of an always-on container."""
+    """Get status of an always-on ECS Fargate task."""
     _require_role(authorization, roles=["admin"])
     stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+
+    task_arn = ""
+    endpoint = ""
+    ecs_status = "STOPPED"
+
     try:
-        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
-        endpoint_param = ssm.get_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/endpoint")
-        endpoint = endpoint_param["Parameter"]["Value"]
-        # Ping the container
-        try:
-            import requests as _r
-            ping = _r.get(f"{endpoint}/ping", timeout=3)
-            running = ping.status_code == 200
-        except Exception:
-            running = False
-        return {"running": running, "endpoint": endpoint, "agentId": agent_id}
+        task_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn"
+        )["Parameter"]["Value"]
     except Exception:
-        return {"running": False, "endpoint": None, "agentId": agent_id}
+        return {"running": False, "endpoint": None, "agentId": agent_id, "ecsStatus": "NOT_FOUND"}
+
+    try:
+        endpoint = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/endpoint"
+        )["Parameter"]["Value"]
+    except Exception:
+        pass  # endpoint registered async after task is RUNNING
+
+    try:
+        import boto3 as _b3ecs3
+        ecs_cfg = _get_ecs_config()
+        desc = _b3ecs3.client("ecs", region_name=_GATEWAY_REGION).describe_tasks(
+            cluster=ecs_cfg["cluster"], tasks=[task_arn])
+        tasks = desc.get("tasks", [])
+        ecs_status = tasks[0].get("lastStatus", "UNKNOWN") if tasks else "NOT_FOUND"
+    except Exception:
+        pass
+
+    running = ecs_status == "RUNNING"
+    return {"running": running, "endpoint": endpoint or None,
+            "agentId": agent_id, "taskArn": task_arn, "ecsStatus": ecs_status}
 
 
 @app.put("/api/v1/admin/always-on/{agent_id}/assign/{emp_id}")
