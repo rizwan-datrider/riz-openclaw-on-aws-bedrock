@@ -595,7 +595,30 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
                     if kb_soul_lines:
                         soul_path = os.path.join(WORKSPACE, "SOUL.md")
                         if os.path.isfile(soul_path):
-                            kb_block = "\n\n<!-- KNOWLEDGE BASES -->\nYou have access to the following knowledge base documents in your workspace:\n" + "\n".join(kb_soul_lines) + "\nUse the `file` tool to read these documents when relevant to the user's question."
+                            # Build KB block with specific proactive instructions
+                            kb_lines_text = "\n".join(kb_soul_lines)
+                            # Check if org directory KB is included — give explicit instruction
+                            has_org_dir = any("org-directory" in line or "Company Directory" in line
+                                              for line in kb_soul_lines)
+                            org_dir_instruction = ""
+                            if has_org_dir:
+                                org_dir_path = next(
+                                    (line.split(": ", 1)[1].rstrip() for line in kb_soul_lines
+                                     if "org-directory" in line or "Company Directory" in line), "")
+                                org_dir_instruction = (
+                                    f"\n**PROACTIVE RULE**: When the user asks about any colleague, "
+                                    f"team member, department, or who to contact for any topic, "
+                                    f"ALWAYS use the `file` tool to read {org_dir_path}company-directory.md "
+                                    f"BEFORE answering. This file lists all ACME Corp employees with their "
+                                    f"roles, responsibilities, and contact information."
+                                )
+                            kb_block = (
+                                "\n\n<!-- KNOWLEDGE BASES -->\n"
+                                "You have access to the following knowledge base documents:\n"
+                                + kb_lines_text
+                                + "\nUse the `file` tool to read these when relevant to the user's question."
+                                + org_dir_instruction
+                            )
                             with open(soul_path, "a") as f:
                                 f.write(kb_block)
 
