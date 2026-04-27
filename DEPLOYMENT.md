@@ -37,7 +37,7 @@ sudo dpkg -i session-manager-plugin.deb
 aws configure
 # Enter your AWS Access Key ID
 # Enter your AWS Secret Access Key
-# Enter default region (e.g., us-west-2)
+# Enter default region (e.g., us-east-1)
 # Enter default output format (json)
 ```
 
@@ -72,12 +72,12 @@ aws cloudformation create-stack \
     ParameterKey=InstanceType,ParameterValue=t4g.medium \
     ParameterKey=CreateVPCEndpoints,ParameterValue=true \
   --capabilities CAPABILITY_IAM \
-  --region us-west-2
+  --region us-east-1
 
 # Wait for completion (~8 minutes)
 aws cloudformation wait stack-create-complete \
   --stack-name OpenClaw-bedrock \
-  --region us-west-2
+  --region us-east-1
 ```
 
 **Default Configuration:**
@@ -91,20 +91,21 @@ aws cloudformation wait stack-create-complete \
 
 ```bash
 INSTANCE_ID=$(aws cloudformation describe-stacks \
-  --stack-name OpenClaw-bedrock \
+  --stack-name openclaw-bedrock-1774784944 \
   --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' \
   --output text \
-  --region us-west-2)
+  --region us-east-1)
 
 echo $INSTANCE_ID
 ```
+# i-0148c935c079d638f
 
 ### Step 2: Start Port Forwarding
 
 ```bash
 aws ssm start-session \
   --target $INSTANCE_ID \
-  --region us-west-2 \
+  --region us-east-1 \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 ```
@@ -117,13 +118,13 @@ Open a new terminal:
 
 ```bash
 # Connect to instance
-aws ssm start-session --target $INSTANCE_ID --region us-west-2
+aws ssm start-session --target i-0148c935c079d638f --region us-east-1
 
 # Switch to ubuntu user
 sudo su - ubuntu
 
 # Get token from SSM Parameter Store
-aws ssm get-parameter --name /openclaw/openclaw-bedrock/gateway-token --with-decryption --query Parameter.Value --output text --region us-west-2
+aws ssm get-parameter --name /openclaw/openclaw-bedrock-1774784944/gateway-token --with-decryption --query Parameter.Value --output text --region us-east-1
 ```
 
 ### Step 4: Open Web UI
@@ -132,6 +133,8 @@ Open in browser:
 ```
 http://localhost:18789/?token=<your-token>
 ```
+
+http://localhost:18789/?token=ad4f935898e2bad191749638147052396e7d1db729b7581b
 
 ## Connecting Messaging Platforms
 
@@ -172,7 +175,7 @@ For detailed guides, visit [OpenClaw Documentation](https://docs.molt.bot/channe
 
 ```bash
 # Connect via SSM
-aws ssm start-session --target $INSTANCE_ID --region us-west-2
+aws ssm start-session --target $INSTANCE_ID --region us-east-1
 
 # Check status
 sudo su - ubuntu
@@ -238,7 +241,7 @@ aws cloudformation update-stack \
     ParameterKey=KeyPairName,UsePreviousValue=true \
     ParameterKey=openclawModel,UsePreviousValue=true \
   --capabilities CAPABILITY_IAM \
-  --region us-west-2
+  --region us-east-1
 ```
 
 **Instance Options:**
@@ -274,7 +277,7 @@ aws cloudformation update-stack \
     ParameterKey=openclawModel,UsePreviousValue=true \
     ParameterKey=InstanceType,UsePreviousValue=true \
   --capabilities CAPABILITY_IAM \
-  --region us-west-2
+  --region us-east-1
 ```
 
 ## Cleanup
@@ -283,12 +286,12 @@ aws cloudformation update-stack \
 # Delete stack (removes all resources)
 aws cloudformation delete-stack \
   --stack-name OpenClaw-bedrock \
-  --region us-west-2
+  --region us-east-1
 
 # Wait for deletion
 aws cloudformation wait stack-delete-complete \
   --stack-name OpenClaw-bedrock \
-  --region us-west-2
+  --region us-east-1
 ```
 
 ## Cost Optimization

@@ -40,6 +40,12 @@ Parameters:
       - "us.deepseek.r1-v1:0"
       - "us.meta.llama3-3-70b-instruct-v1:0"
       - "moonshotai.kimi-k2.5"
+      - "global.anthropic.claude-sonnet-4-6"
+      - "global.anthropic.claude-opus-4-7"
+      - "anthropic.claude-sonnet-4-6"
+      - "anthropic.claude-opus-4-7"
+      - "deepseek.v3.2"
+      - "moonshot.kimi-k2-thinking"
 
   MacInstanceType:
     Type: String
